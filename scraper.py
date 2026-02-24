@@ -7,10 +7,28 @@ import time
 import logging
 from urllib.parse import urljoin, quote
 import re
+import ssl
+import urllib3
+from requests.adapters import HTTPAdapter
+from urllib3.util.ssl_ import create_urllib3_context
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Custom SSL adapter to handle legacy SSL renegotiation
+class SSLAdapter(HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        context = create_urllib3_context()
+        context.load_default_certs()
+        context.set_ciphers('DEFAULT@SECLEVEL=1')
+        # Allow legacy renegotiation for older servers
+        context.options |= 0x4  # OP_LEGACY_SERVER_CONNECT
+        kwargs['ssl_context'] = context
+        return super().init_poolmanager(*args, **kwargs)
+
+# Disable SSL warnings for legacy connections
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class KCSBScraper:
     def __init__(self, aws_access_key, aws_secret_key, bucket_name):
@@ -19,6 +37,10 @@ class KCSBScraper:
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
+        
+        # Mount custom SSL adapter for both http and https
+        self.session.mount('https://', SSLAdapter())
+        self.session.mount('http://', SSLAdapter())
         
         # S3 setup
         self.s3_client = boto3.client(
