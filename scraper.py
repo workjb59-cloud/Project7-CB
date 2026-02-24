@@ -11,6 +11,8 @@ import ssl
 import urllib3
 from requests.adapters import HTTPAdapter
 from urllib3.util.ssl_ import create_urllib3_context
+import pandas as pd
+from io import BytesIO
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -140,54 +142,148 @@ class KCSBScraper:
             
             if not tab_content:
                 logger.warning(f"Tab {tab_name} not found")
-                return []
+                return {'files': [], 'text_content': None}
             
             files = []
+            text_content = None
             
             # Find table with files
             table = tab_content.find('table')
-            if not table:
-                logger.info(f"No table found in tab {tab_name}")
-                return []
             
-            rows = table.find('tbody').find_all('tr') if table.find('tbody') else []
-            
-            for row in rows:
-                cols = row.find_all('td')
-                if len(cols) < 2:
-                    continue
+            if table:
+                rows = table.find('tbody').find_all('tr') if table.find('tbody') else []
                 
-                title = cols[0].get_text(strip=True)
-                
-                # Find download links
-                pdf_links = cols[1].find_all('a', href=True)
-                
-                for link in pdf_links:
-                    img = link.find('img')
-                    if not img:
+                for row in rows:
+                    cols = row.find_all('td')
+                    if len(cols) < 2:
                         continue
                     
-                    img_src = img.get('src', '')
-                    file_type = 'pdf' if 'pdf' in img_src.lower() else 'excel' if 'xls' in img_src.lower() else 'unknown'
+                    title = cols[0].get_text(strip=True)
                     
-                    # Extract the postback event target
-                    href = link.get('href', '')
-                    event_target_match = re.search(r"'([^']+)'", href)
+                    # Find download links
+                    pdf_links = cols[1].find_all('a', href=True)
                     
-                    if event_target_match:
-                        event_target = event_target_match.group(1)
+                    for link in pdf_links:
+                        img = link.find('img')
+                        if not img:
+                            continue
                         
-                        files.append({
-                            'title': title,
-                            'file_type': file_type,
-                            'event_target': event_target
-                        })
+                        img_src = img.get('src', '')
+                        file_type = 'pdf' if 'pdf' in img_src.lower() else 'excel' if 'xls' in img_src.lower() else 'unknown'
+                        
+                        # Extract the postback event target
+                        href = link.get('href', '')
+                        event_target_match = re.search(r"'([^']+)'", href)
+                        
+                        if event_target_match:
+                            event_target = event_target_match.group(1)
+                            
+                            files.append({
+                                'title': title,
+                                'file_type': file_type,
+                                'event_target': event_target
+                            })
             
-            return files
+            # If no files found, check for text content
+            if not files:
+                text_content = self.extract_text_content(tab_content, tab_id)
+            
+            return {'files': files, 'text_content': text_content}
             
         except Exception as e:
             logger.error(f"Error scraping tab {tab_name}: {e}")
-            return []
+            return {'files': [], 'text_content': None}
+    
+    def extract_text_content(self, tab_content, tab_id):
+        """Extract text content from tabs like الموضوع, البيانات الوصفية, التقارير"""
+        data = {}
+        
+        try:
+            # For T2 (الموضوع) - extract definition and components
+            if tab_id == 'T2':
+                list_group = tab_content.find('div', class_='list-group')
+                if list_group:
+                    sections = []
+                    list_items = list_group.find_all('a', class_='list-group-item')
+                    
+                    current_section = None
+                    for item in list_items:
+                        if 'active' in item.get('class', []):
+                            current_section = item.get_text(strip=True)
+                        else:
+                            content = item.get_text(strip=True)
+                            if content and current_section:
+                                sections.append({
+                                    'القسم': current_section,
+                                    'المحتوى': content
+                                })
+                    
+                    if sections:
+                        data['sections'] = sections
+            
+            # For T4 (البيانات الوصفية) - extract metadata
+            elif tab_id == 'T4':
+                title_elem = tab_content.find('span', {'id': re.compile(r'.*lbl_calc_title.*')})
+                details_elem = tab_content.find('span', {'id': re.compile(r'.*lbl_calc_details.*')})
+                
+                title = title_elem.get_text(strip=True) if title_elem else ''
+                details = details_elem.get_text(strip=True) if details_elem else ''
+                
+                if title or details:
+                    data['metadata'] = [{
+                        'العنوان': title,
+                        'التفاصيل': details
+                    }]
+            
+            # For T5 (التقارير) - check for any text content
+            elif tab_id == 'T5':
+                # Sometimes T5 has text content outside the table
+                text_divs = tab_content.find_all('div', class_='col-md-12')
+                content_found = []
+                
+                for div in text_divs:
+                    text = div.get_text(strip=True)
+                    # Filter out empty or very short text
+                    if text and len(text) > 50:
+                        content_found.append(text)
+                
+                if content_found:
+                    data['reports'] = [{'المحتوى': '\n\n'.join(content_found)}]
+            
+            return data if data else None
+            
+        except Exception as e:
+            logger.error(f"Error extracting text content: {e}")
+            return None
+    
+    def create_excel_from_data(self, data, tab_name):
+        """Convert text data to Excel format"""
+        try:
+            output = BytesIO()
+            
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                if 'sections' in data:
+                    df = pd.DataFrame(data['sections'])
+                    df.to_excel(writer, sheet_name=tab_name[:30], index=False)
+                elif 'metadata' in data:
+                    df = pd.DataFrame(data['metadata'])
+                    df.to_excel(writer, sheet_name=tab_name[:30], index=False)
+                elif 'reports' in data:
+                    df = pd.DataFrame(data['reports'])
+                    df.to_excel(writer, sheet_name=tab_name[:30], index=False)
+                else:
+                    # Generic handling
+                    for key, value in data.items():
+                        if isinstance(value, list):
+                            df = pd.DataFrame(value)
+                            df.to_excel(writer, sheet_name=key[:30], index=False)
+            
+            output.seek(0)
+            return output.getvalue()
+            
+        except Exception as e:
+            logger.error(f"Error creating Excel file: {e}")
+            return None
     
     def download_file(self, category_url, event_target, file_info, save_path):
         """Download a file using ASP.NET postback"""
@@ -264,8 +360,11 @@ class KCSBScraper:
             tab_name = self.sanitize_filename(tab['name'])
             logger.info(f"  Processing tab: {tab_name}")
             
-            files = self.scrape_tab_content(category_url, tab['name'], tab['id'])
+            result = self.scrape_tab_content(category_url, tab['name'], tab['id'])
+            files = result['files']
+            text_content = result['text_content']
             
+            # Process downloadable files
             for idx, file_info in enumerate(files, 1):
                 stats['total'] += 1
                 
@@ -294,6 +393,26 @@ class KCSBScraper:
                 
                 # Be respectful - add delay
                 time.sleep(2)
+            
+            # Process text content if no files found
+            if not files and text_content:
+                stats['total'] += 1
+                logger.info(f"    Extracting text content from {tab_name}")
+                
+                # Convert text content to Excel
+                excel_content = self.create_excel_from_data(text_content, tab_name)
+                
+                if excel_content:
+                    filename = f"{tab_name}_content.xlsx"
+                    s3_path = f"{self.base_s3_path}/{main_category}/{subcategory}/{tab_name}/{filename}"
+                    
+                    if self.upload_to_s3(excel_content, s3_path):
+                        stats['success'] += 1
+                        logger.info(f"    Uploaded text content as Excel: {filename}")
+                    else:
+                        stats['failed'] += 1
+                else:
+                    stats['failed'] += 1
         
         return stats
     
