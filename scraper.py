@@ -458,8 +458,34 @@ class KCSBScraper:
                     logger.debug("Got HTML, looking for download link...")
                     detail_soup = BeautifulSoup(first_response.content, 'html.parser')
                     
-                    # Look for the actual download link (lnk_down_file)
+                    # Pattern 1: Look for the modal download link (lnk_down_file)
                     download_link = detail_soup.find('a', {'id': lambda x: x and 'lnk_down_file' in x})
+                    
+                    # Pattern 2: Look for RepeaterForChild links (expanded section pattern)
+                    if not download_link:
+                        logger.debug("lnk_down_file not found, checking RepeaterForChild...")
+                        
+                        # Determine which file type we want (PDF or Excel) based on original event target
+                        want_pdf = 'LinkButton3' in event_target  # LinkButton3 = PDF
+                        want_excel = 'LinkButton4' in event_target  # LinkButton4 = Excel
+                        
+                        # Find all RepeaterForChild links
+                        repeater_links = detail_soup.find_all('a', {'id': lambda x: x and 'RepeaterForChild' in x})
+                        
+                        for link in repeater_links:
+                            img = link.find('img')
+                            if img:
+                                img_src = img.get('src', '').lower()
+                                
+                                # Match file type
+                                if want_pdf and 'pdf' in img_src:
+                                    download_link = link
+                                    logger.debug(f"Found RepeaterForChild PDF link: {link.get('id')}")
+                                    break
+                                elif want_excel and ('xls' in img_src or 'excel' in img_src):
+                                    download_link = link
+                                    logger.debug(f"Found RepeaterForChild Excel link: {link.get('id')}")
+                                    break
                     
                     if download_link:
                         logger.debug("Found download link, performing second postback...")
@@ -521,8 +547,13 @@ class KCSBScraper:
                                     return content
                     
                     # If we couldn't find download link, log details
-                    logger.warning(f"Could not find download link in detail view")
+                    logger.warning(f"Could not find download link (lnk_down_file or RepeaterForChild) in response")
                     logger.debug(f"Response size: {len(first_response.content)} bytes")
+                    
+                    # Debug: count what we did find
+                    all_postback_links = detail_soup.find_all('a', href=lambda x: x and '__doPostBack' in x)
+                    repeater_links = [l for l in all_postback_links if 'RepeaterForChild' in l.get('id', '')]
+                    logger.debug(f"Found {len(all_postback_links)} total postback links, {len(repeater_links)} RepeaterForChild links")
                 
                 # If we get here, something didn't work
                 logger.warning(f"Unexpected content type: {content_type}")
