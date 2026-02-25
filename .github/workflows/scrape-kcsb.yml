@@ -1,15 +1,16 @@
 name: KCSB Data Scraper
 
 on:
-  # Run on schedule (every day at 2 AM UTC)
+  # Run quarterly on the 1st of January, April, July, and October at 2 AM UTC
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '0 2 1 1,4,7,10 *'
   
   # Allow manual trigger
   workflow_dispatch:
 
 jobs:
-  scrape-and-upload:
+  scrape-general-statistics:
+    name: الاحصاءات العامة
     runs-on: ubuntu-latest
     
     steps:
@@ -26,19 +27,159 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Run scraper
+      - name: Run scraper for الاحصاءات العامة
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+          AWS_BUCKET_NAME: ${{ secrets.AWS_BUCKET_NAME }}
         run: |
-          python scraper.py
+          python scraper.py --category "الاحصاءات العامة"
       
-      - name: Upload logs (if any)
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scraper-logs
+          name: logs-general-statistics
+          path: |
+            *.log
+          retention-days: 7
+
+  scrape-population-statistics:
+    name: الاحصاءات السكانية
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run scraper for الاحصاءات السكانية
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_BUCKET_NAME: ${{ secrets.AWS_BUCKET_NAME }}
+        run: |
+          python scraper.py --category "الاحصاءات السكانية"
+      
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-population-statistics
+          path: |
+            *.log
+          retention-days: 7
+
+  scrape-economic-statistics:
+    name: الإحصاءات الاقتصادية
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run scraper for الإحصاءات الاقتصادية
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_BUCKET_NAME: ${{ secrets.AWS_BUCKET_NAME }}
+        run: |
+          python scraper.py --category "الإحصاءات الاقتصادية"
+      
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-economic-statistics
+          path: |
+            *.log
+          retention-days: 7
+
+  scrape-trade-agriculture-statistics:
+    name: الإحصاءات التجارية والزراعية
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run scraper for الإحصاءات التجارية والزراعية
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_BUCKET_NAME: ${{ secrets.AWS_BUCKET_NAME }}
+        run: |
+          python scraper.py --category "الإحصاءات التجارية والزراعية"
+      
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-trade-agriculture-statistics
+          path: |
+            *.log
+          retention-days: 7
+
+  scrape-social-services-statistics:
+    name: الاحصاءات الاجتماعية والخدمات
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run scraper for الاحصاءات الاجتماعية والخدمات
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_BUCKET_NAME: ${{ secrets.AWS_BUCKET_NAME }}
+        run: |
+          python scraper.py --category "الاحصاءات الاجتماعية والخدمات"
+      
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-social-services-statistics
           path: |
             *.log
           retention-days: 7

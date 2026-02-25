@@ -13,6 +13,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.ssl_ import create_urllib3_context
 import pandas as pd
 from io import BytesIO
+import argparse
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -321,6 +322,14 @@ class KCSBScraper:
             logger.error(f"Error downloading file: {e}")
             return None
     
+    def file_exists_in_s3(self, s3_path):
+        """Check if file already exists in S3"""
+        try:
+            self.s3_client.head_object(Bucket=self.bucket_name, Key=s3_path)
+            return True
+        except:
+            return False
+    
     def upload_to_s3(self, file_content, s3_path):
         """Upload file to S3"""
         try:
@@ -354,7 +363,7 @@ class KCSBScraper:
             {'name': 'التقارير', 'id': 'T5'}
         ]
         
-        stats = {'total': 0, 'success': 0, 'failed': 0}
+        stats = {'total': 0, 'success': 0, 'failed': 0, 'skipped': 0}
         
         for tab in tabs:
             tab_name = self.sanitize_filename(tab['name'])
@@ -377,6 +386,12 @@ class KCSBScraper:
                 filename = f"{title}_{idx}.{extension}"
                 s3_path = f"{self.base_s3_path}/{main_category}/{subcategory}/{tab_name}/{filename}"
                 
+                # Check if file already exists in S3
+                if self.file_exists_in_s3(s3_path):
+                    logger.info(f"    Skipping (already exists): {title[:50]}...")
+                    stats['skipped'] += 1
+                    continue
+                
                 logger.info(f"    Downloading: {title[:50]}...")
                 
                 # Download file
@@ -397,15 +412,21 @@ class KCSBScraper:
             # Process text content if no files found
             if not files and text_content:
                 stats['total'] += 1
+                filename = f"{tab_name}_content.xlsx"
+                s3_path = f"{self.base_s3_path}/{main_category}/{subcategory}/{tab_name}/{filename}"
+                
+                # Check if text content already exists
+                if self.file_exists_in_s3(s3_path):
+                    logger.info(f"    Skipping text content (already exists): {tab_name}")
+                    stats['skipped'] += 1
+                    continue
+                
                 logger.info(f"    Extracting text content from {tab_name}")
                 
                 # Convert text content to Excel
                 excel_content = self.create_excel_from_data(text_content, tab_name)
                 
                 if excel_content:
-                    filename = f"{tab_name}_content.xlsx"
-                    s3_path = f"{self.base_s3_path}/{main_category}/{subcategory}/{tab_name}/{filename}"
-                    
                     if self.upload_to_s3(excel_content, s3_path):
                         stats['success'] += 1
                         logger.info(f"    Uploaded text content as Excel: {filename}")
@@ -416,9 +437,12 @@ class KCSBScraper:
         
         return stats
     
-    def run(self):
+    def run(self, filter_main_category=None):
         """Main execution method"""
-        logger.info("Starting KCSB data scraping...")
+        if filter_main_category:
+            logger.info(f"Starting KCSB data scraping for category: {filter_main_category}")
+        else:
+            logger.info("Starting KCSB data scraping for ALL categories...")
         
         # Get all categories
         categories = self.get_categories()
@@ -427,8 +451,17 @@ class KCSBScraper:
             logger.error("No categories found. Exiting.")
             return
         
+        # Filter by main category if specified
+        if filter_main_category:
+            categories = [c for c in categories if c['main_category'] == filter_main_category]
+            logger.info(f"Filtered to {len(categories)} subcategories in '{filter_main_category}'")
+            
+            if not categories:
+                logger.error(f"No subcategories found for main category: {filter_main_category}")
+                return
+        
         # Statistics
-        total_stats = {'total': 0, 'success': 0, 'failed': 0}
+        total_stats = {'total': 0, 'success': 0, 'failed': 0, 'skipped': 0}
         
         # Process each category
         for idx, category in enumerate(categories, 1):
@@ -439,6 +472,7 @@ class KCSBScraper:
             total_stats['total'] += stats['total']
             total_stats['success'] += stats['success']
             total_stats['failed'] += stats['failed']
+            total_stats['skipped'] += stats.get('skipped', 0)
             
             # Delay between categories
             time.sleep(3)
@@ -446,13 +480,24 @@ class KCSBScraper:
         # Final summary
         logger.info("\n" + "="*50)
         logger.info("SCRAPING COMPLETE")
-        logger.info(f"Total files processed: {total_stats['total']}")
-        logger.info(f"Successfully uploaded: {total_stats['success']}")
+        logger.info(f"Total files found: {total_stats['total']}")
+        logger.info(f"New files uploaded: {total_stats['success']}")
+        logger.info(f"Already existed (skipped): {total_stats['skipped']}")
         logger.info(f"Failed: {total_stats['failed']}")
         logger.info("="*50)
 
 
 if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Scrape KCSB data and upload to S3')
+    parser.add_argument(
+        '--category',
+        type=str,
+        help='Filter by main category name (e.g., "الاحصاءات العامة")',
+        default=None
+    )
+    args = parser.parse_args()
+    
     # Get AWS credentials from environment variables
     aws_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
     aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
@@ -462,6 +507,6 @@ if __name__ == "__main__":
         logger.error("AWS credentials not found in environment variables")
         exit(1)
     
-    # Create scraper and run
+    # Create scraper and run with optional category filter
     scraper = KCSBScraper(aws_access_key, aws_secret_key, bucket_name)
-    scraper.run()
+    scraper.run(filter_main_category=args.category)
