@@ -185,6 +185,47 @@ class KCSBScraper:
                                 'event_target': event_target
                             })
             
+            # Also check for modal popup with additional files
+            modal = soup.find('div', {'id': 'Panel_Statistic'})
+            if modal:
+                logger.info(f"    Found modal popup with additional files")
+                modal_table = modal.find('table')
+                
+                if modal_table:
+                    modal_rows = modal_table.find('tbody').find_all('tr') if modal_table.find('tbody') else []
+                    
+                    for row in modal_rows:
+                        cols = row.find_all('td')
+                        if len(cols) < 2:
+                            continue
+                        
+                        title = cols[0].get_text(strip=True)
+                        
+                        # Find download links
+                        pdf_links = cols[1].find_all('a', href=True)
+                        
+                        for link in pdf_links:
+                            img = link.find('img')
+                            if not img:
+                                continue
+                            
+                            img_src = img.get('src', '')
+                            file_type = 'pdf' if 'pdf' in img_src.lower() else 'excel' if 'xls' in img_src.lower() else 'unknown'
+                            
+                            # Extract the postback event target
+                            href = link.get('href', '')
+                            event_target_match = re.search(r"'([^']+)'", href)
+                            
+                            if event_target_match:
+                                event_target = event_target_match.group(1)
+                                
+                                files.append({
+                                    'title': title,
+                                    'file_type': file_type,
+                                    'event_target': event_target,
+                                    'source': 'modal'  # Mark as coming from modal
+                                })
+            
             # If no files found, check for text content
             if not files:
                 text_content = self.extract_text_content(tab_content, tab_id)
@@ -288,39 +329,95 @@ class KCSBScraper:
     
     def download_file(self, category_url, event_target, file_info, save_path):
         """Download a file using ASP.NET postback"""
-        try:
-            # First, get the page to extract ViewState
-            response = self.session.get(category_url, timeout=30)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Get ViewState data
-            form_data = self.get_viewstate_data(soup)
-            form_data['__EVENTTARGET'] = event_target
-            form_data['__EVENTARGUMENT'] = ''
-            
-            # Post the form to trigger download
-            download_response = self.session.post(
-                category_url,
-                data=form_data,
-                timeout=60,
-                stream=True
-            )
-            
-            download_response.raise_for_status()
-            
-            # Check if we got a file
-            content_type = download_response.headers.get('Content-Type', '')
-            
-            if 'application/pdf' in content_type or 'application/vnd' in content_type or 'octet-stream' in content_type:
-                return download_response.content
-            else:
-                logger.warning(f"Unexpected content type: {content_type}")
-                return None
+        max_retries = 3
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                # First, get the page to extract ViewState
+                response = self.session.get(category_url, timeout=30)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.content, 'html.parser')
                 
-        except Exception as e:
-            logger.error(f"Error downloading file: {e}")
-            return None
+                # Get ViewState data and all hidden fields
+                form_data = self.get_viewstate_data(soup)
+                form_data['__EVENTTARGET'] = event_target
+                form_data['__EVENTARGUMENT'] = ''
+                
+                # Add any additional hidden fields from the form
+                hidden_inputs = soup.find_all('input', type='hidden')
+                for hidden in hidden_inputs:
+                    name = hidden.get('name')
+                    value = hidden.get('value', '')
+                    if name and name not in form_data:
+                        form_data[name] = value
+                
+                # Post the form to trigger download
+                download_response = self.session.post(
+                    category_url,
+                    data=form_data,
+                    timeout=60,
+                    stream=True,
+                    allow_redirects=True
+                )
+                
+                download_response.raise_for_status()
+                
+                # Check if we got a file
+                content_type = download_response.headers.get('Content-Type', '')
+                content_disposition = download_response.headers.get('Content-Disposition', '')
+                
+                # Check for file download indicators
+                if (content_disposition or 
+                    'application/pdf' in content_type or 
+                    'application/vnd' in content_type or 
+                    'application/octet-stream' in content_type or
+                    'application/x-download' in content_type):
+                    
+                    # Additional check: if content is very small, it might be an error
+                    content = download_response.content
+                    if len(content) < 1000:
+                        logger.warning(f"File too small ({len(content)} bytes), might be an error")
+                        # Check if it's HTML
+                        try:
+                            content.decode('utf-8')
+                            if b'<html' in content.lower() or b'<!doctype' in content.lower():
+                                logger.warning(f"Small file contains HTML, skipping")
+                                if attempt < max_retries:
+                                    logger.info(f"  Retry {attempt}/{max_retries}...")
+                                    time.sleep(3)
+                                    continue
+                                return None
+                        except:
+                            pass  # Not text, probably binary
+                    
+                    return content
+                else:
+                    logger.warning(f"Unexpected content type: {content_type}")
+                    
+                    # Log first 500 chars of response for debugging
+                    try:
+                        preview = download_response.content[:500].decode('utf-8', errors='ignore')
+                        if '<html' in preview.lower() or 'error' in preview.lower():
+                            logger.debug(f"Response preview: {preview[:200]}...")
+                    except:
+                        pass
+                    
+                    # Retry if not last attempt
+                    if attempt < max_retries:
+                        logger.info(f"  Retry {attempt}/{max_retries}...")
+                        time.sleep(3)
+                        continue
+                    
+                    return None
+                    
+            except Exception as e:
+                logger.error(f"Error downloading file (attempt {attempt}/{max_retries}): {e}")
+                if attempt < max_retries:
+                    time.sleep(3)
+                    continue
+                return None
+        
+        return None
     
     def file_exists_in_s3(self, s3_path):
         """Check if file already exists in S3"""
@@ -380,6 +477,7 @@ class KCSBScraper:
                 title = self.sanitize_filename(file_info['title'])
                 file_type = file_info['file_type']
                 event_target = file_info['event_target']
+                is_modal = file_info.get('source') == 'modal'
                 
                 # Create S3 path
                 extension = 'pdf' if file_type == 'pdf' else 'xlsx' if file_type == 'excel' else 'bin'
@@ -388,11 +486,13 @@ class KCSBScraper:
                 
                 # Check if file already exists in S3
                 if self.file_exists_in_s3(s3_path):
-                    logger.info(f"    Skipping (already exists): {title[:50]}...")
+                    modal_prefix = "[Modal] " if is_modal else ""
+                    logger.info(f"    Skipping (already exists): {modal_prefix}{title[:50]}...")
                     stats['skipped'] += 1
                     continue
                 
-                logger.info(f"    Downloading: {title[:50]}...")
+                modal_prefix = "[Modal] " if is_modal else ""
+                logger.info(f"    Downloading: {modal_prefix}{title[:50]}...")
                 
                 # Download file
                 file_content = self.download_file(category_url, event_target, file_info, s3_path)
@@ -401,13 +501,16 @@ class KCSBScraper:
                     # Upload to S3
                     if self.upload_to_s3(file_content, s3_path):
                         stats['success'] += 1
+                        logger.info(f"    ✓ Successfully uploaded: {filename}")
                     else:
                         stats['failed'] += 1
+                        logger.error(f"    ✗ Failed to upload: {filename}")
                 else:
                     stats['failed'] += 1
+                    logger.error(f"    ✗ Failed to download: {filename}")
                 
-                # Be respectful - add delay
-                time.sleep(2)
+                # Be respectful - add delay between downloads
+                time.sleep(3)
             
             # Process text content if no files found
             if not files and text_content:
