@@ -161,7 +161,15 @@ class KCSBScraper:
                     
                     title = cols[0].get_text(strip=True)
                     
-                    # Find download links
+                    # Check if this row has a modal trigger (skip these, get files from modal instead)
+                    title_cell = cols[0]
+                    modal_trigger = title_cell.find('a', {'data-toggle': 'modal'}) or title_cell.find('a', {'onclick': lambda x: x and 'modal' in x.lower()})
+                    
+                    if modal_trigger:
+                        logger.debug(f"    Skipping parent row (opens modal): {title[:50]}")
+                        continue
+                    
+                    # Find download links (only with file icons)
                     pdf_links = cols[1].find_all('a', href=True)
                     
                     for link in pdf_links:
@@ -170,10 +178,21 @@ class KCSBScraper:
                             continue
                         
                         img_src = img.get('src', '')
+                        
+                        # Only process actual file download links (with pdf/excel icons)
+                        if 'pdf' not in img_src.lower() and 'xls' not in img_src.lower():
+                            continue
+                        
                         file_type = 'pdf' if 'pdf' in img_src.lower() else 'excel' if 'xls' in img_src.lower() else 'unknown'
                         
                         # Extract the postback event target
                         href = link.get('href', '')
+                        
+                        # Must contain __doPostBack to be a valid download link
+                        if '__doPostBack' not in href:
+                            logger.debug(f"    Skipping non-postback link: {title[:30]}")
+                            continue
+                        
                         event_target_match = re.search(r"'([^']+)'", href)
                         
                         if event_target_match:
@@ -201,7 +220,7 @@ class KCSBScraper:
                         
                         title = cols[0].get_text(strip=True)
                         
-                        # Find download links
+                        # Find download links (only with file icons)
                         pdf_links = cols[1].find_all('a', href=True)
                         
                         for link in pdf_links:
@@ -210,10 +229,21 @@ class KCSBScraper:
                                 continue
                             
                             img_src = img.get('src', '')
+                            
+                            # Only process actual file download links (with pdf/excel icons)
+                            if 'pdf' not in img_src.lower() and 'xls' not in img_src.lower():
+                                continue
+                            
                             file_type = 'pdf' if 'pdf' in img_src.lower() else 'excel' if 'xls' in img_src.lower() else 'unknown'
                             
                             # Extract the postback event target
                             href = link.get('href', '')
+                            
+                            # Must contain __doPostBack to be a valid download link
+                            if '__doPostBack' not in href:
+                                logger.debug(f"    Skipping non-postback modal link: {title[:30]}")
+                                continue
+                            
                             event_target_match = re.search(r"'([^']+)'", href)
                             
                             if event_target_match:
@@ -328,87 +358,184 @@ class KCSBScraper:
             return None
     
     def download_file(self, category_url, event_target, file_info, save_path):
-        """Download a file using ASP.NET postback"""
+        """Download a file using ASP.NET two-step postback"""
         max_retries = 3
         
         for attempt in range(1, max_retries + 1):
             try:
-                # First, get the page to extract ViewState
+                # STEP 1: Get the page to extract ViewState
                 response = self.session.get(category_url, timeout=30)
                 response.raise_for_status()
                 soup = BeautifulSoup(response.content, 'html.parser')
                 
-                # Get ViewState data and all hidden fields
+                # Get ViewState data and all form fields
                 form_data = self.get_viewstate_data(soup)
                 form_data['__EVENTTARGET'] = event_target
                 form_data['__EVENTARGUMENT'] = ''
                 
-                # Add any additional hidden fields from the form
-                hidden_inputs = soup.find_all('input', type='hidden')
-                for hidden in hidden_inputs:
-                    name = hidden.get('name')
-                    value = hidden.get('value', '')
-                    if name and name not in form_data:
-                        form_data[name] = value
+                # Get the form and its action URL
+                form = soup.find('form')
+                form_action_url = category_url  # Default to page URL
                 
-                # Post the form to trigger download
-                download_response = self.session.post(
-                    category_url,
+                if form:
+                    # Get form action if specified
+                    form_action = form.get('action')
+                    if form_action:
+                        form_action_url = urljoin(category_url, form_action)
+                    
+                    # Get all form fields
+                    all_inputs = form.find_all('input')
+                    for inp in all_inputs:
+                        name = inp.get('name')
+                        if not name or name in form_data:
+                            continue
+                        
+                        input_type = inp.get('type', '').lower()
+                        
+                        if input_type == 'checkbox' or input_type == 'radio':
+                            if inp.get('checked'):
+                                form_data[name] = inp.get('value', 'on')
+                        else:
+                            form_data[name] = inp.get('value', '')
+                    
+                    # Get all select/dropdown fields
+                    all_selects = form.find_all('select')
+                    for select in all_selects:
+                        name = select.get('name')
+                        if not name or name in form_data:
+                            continue
+                        
+                        selected = select.find('option', selected=True)
+                        if selected:
+                            form_data[name] = selected.get('value', '')
+                        else:
+                            first_option = select.find('option')
+                            form_data[name] = first_option.get('value', '') if first_option else ''
+                    
+                    # Get all textarea fields
+                    all_textareas = form.find_all('textarea')
+                    for textarea in all_textareas:
+                        name = textarea.get('name')
+                        if name and name not in form_data:
+                            form_data[name] = textarea.get_text(strip=True)
+                
+                # Prepare headers for ASP.NET postback
+                post_headers = {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Referer': category_url,
+                    'Origin': 'https://www.csb.gov.kw',
+                    'Accept': '*/*',
+                    'Accept-Language': 'ar,en;q=0.9',
+                    'Cache-Control': 'no-cache'
+                }
+                
+                # STEP 2: Post to open detail/modal view
+                logger.debug(f"Step 1: Posting to {event_target}")
+                first_response = self.session.post(
+                    form_action_url,
                     data=form_data,
-                    timeout=60,
-                    stream=True,
-                    allow_redirects=True
+                    headers=post_headers,
+                    timeout=60
                 )
                 
-                download_response.raise_for_status()
+                first_response.raise_for_status()
                 
-                # Check if we got a file
-                content_type = download_response.headers.get('Content-Type', '')
-                content_disposition = download_response.headers.get('Content-Disposition', '')
+                # Check what we got
+                content_type = first_response.headers.get('Content-Type', '')
                 
-                # Check for file download indicators
-                if (content_disposition or 
-                    'application/pdf' in content_type or 
+                # If we got a file directly (some links might work in one step)
+                if ('application/pdf' in content_type or 
                     'application/vnd' in content_type or 
-                    'application/octet-stream' in content_type or
-                    'application/x-download' in content_type):
+                    'application/octet-stream' in content_type):
                     
-                    # Additional check: if content is very small, it might be an error
-                    content = download_response.content
-                    if len(content) < 1000:
-                        logger.warning(f"File too small ({len(content)} bytes), might be an error")
-                        # Check if it's HTML
-                        try:
-                            content.decode('utf-8')
-                            if b'<html' in content.lower() or b'<!doctype' in content.lower():
-                                logger.warning(f"Small file contains HTML, skipping")
-                                if attempt < max_retries:
-                                    logger.info(f"  Retry {attempt}/{max_retries}...")
-                                    time.sleep(3)
-                                    continue
-                                return None
-                        except:
-                            pass  # Not text, probably binary
+                    content = first_response.content
+                    if len(content) > 1000 or content[:4] == b'%PDF' or content[:2] == b'PK':
+                        logger.debug("Got file in one step")
+                        return content
+                
+                # If we got HTML, look for the download link
+                if 'text/html' in content_type:
+                    logger.debug("Got HTML, looking for download link...")
+                    detail_soup = BeautifulSoup(first_response.content, 'html.parser')
                     
-                    return content
-                else:
-                    logger.warning(f"Unexpected content type: {content_type}")
+                    # Look for the actual download link (lnk_down_file)
+                    download_link = detail_soup.find('a', {'id': lambda x: x and 'lnk_down_file' in x})
                     
-                    # Log first 500 chars of response for debugging
-                    try:
-                        preview = download_response.content[:500].decode('utf-8', errors='ignore')
-                        if '<html' in preview.lower() or 'error' in preview.lower():
-                            logger.debug(f"Response preview: {preview[:200]}...")
-                    except:
-                        pass
+                    if download_link:
+                        logger.debug("Found download link, performing second postback...")
+                        
+                        # Extract event target from href
+                        href = download_link.get('href', '')
+                        if '__doPostBack' in href:
+                            match = re.search(r"__doPostBack\('([^']+)'", href)
+                            if match:
+                                download_event_target = match.group(1)
+                                
+                                # STEP 3: Get fresh ViewState from detail view
+                                form_data2 = self.get_viewstate_data(detail_soup)
+                                form_data2['__EVENTTARGET'] = download_event_target
+                                form_data2['__EVENTARGUMENT'] = ''
+                                
+                                # Get all form fields from detail view
+                                form2 = detail_soup.find('form')
+                                if form2:
+                                    for inp in form2.find_all('input'):
+                                        name = inp.get('name')
+                                        if name and name not in form_data2:
+                                            form_data2[name] = inp.get('value', '')
+                                
+                                # STEP 4: Post to download link
+                                logger.debug(f"Step 2: Posting to {download_event_target}")
+                                download_response = self.session.post(
+                                    form_action_url,
+                                    data=form_data2,
+                                    headers=post_headers,
+                                    timeout=60,
+                                    stream=True
+                                )
+                                
+                                download_response.raise_for_status()
+                                
+                                # Check if we got the file
+                                content_type = download_response.headers.get('Content-Type', '')
+                                
+                                if ('application/pdf' in content_type or 
+                                    'application/vnd' in content_type or 
+                                    'application/octet-stream' in content_type or
+                                    'application/x-download' in content_type):
+                                    
+                                    content = download_response.content
+                                    
+                                    # Verify it's actually a file
+                                    if len(content) < 1000:
+                                        try:
+                                            if b'<html' in content.lower():
+                                                logger.warning(f"Small file contains HTML, skipping")
+                                                if attempt < max_retries:
+                                                    time.sleep(3)
+                                                    continue
+                                                return None
+                                        except:
+                                            pass
+                                    
+                                    return content
                     
-                    # Retry if not last attempt
-                    if attempt < max_retries:
-                        logger.info(f"  Retry {attempt}/{max_retries}...")
-                        time.sleep(3)
-                        continue
-                    
-                    return None
+                    # If we couldn't find download link, log details
+                    logger.warning(f"Could not find download link in detail view")
+                    logger.debug(f"Response size: {len(first_response.content)} bytes")
+                
+                # If we get here, something didn't work
+                logger.warning(f"Unexpected content type: {content_type}")
+                logger.warning(f"Event target was: {event_target}")
+                
+                # Retry if not last attempt
+                if attempt < max_retries:
+                    logger.info(f"  Retry {attempt}/{max_retries}...")
+                    time.sleep(3)
+                    continue
+                
+                logger.error(f"Failed after {max_retries} attempts. File: {file_info['title'][:50]}")
+                return None
                     
             except Exception as e:
                 logger.error(f"Error downloading file (attempt {attempt}/{max_retries}): {e}")
