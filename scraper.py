@@ -491,7 +491,15 @@ class KCSBScraper:
                             downloaded_count = 0
                             for idx, link in enumerate(matching_links, 1):
                                 link_id = link.get('id', '')
-                                logger.info(f"    Downloading {idx}/{len(matching_links)} from expanded section...")
+                                
+                                # Extract file title from link text
+                                file_title = link.get_text(strip=True)
+                                if not file_title:
+                                    file_title = f"child_{idx}"
+                                else:
+                                    file_title = self.sanitize_filename(file_title)
+                                
+                                logger.info(f"    Downloading {idx}/{len(matching_links)}: {file_title[:50]}...")
                                 
                                 # Extract event target
                                 href = link.get('href', '')
@@ -536,14 +544,14 @@ class KCSBScraper:
                                                 parent_folder = save_path.rsplit('/', 1)[0]  # Get parent directory
                                                 section_name = self.sanitize_filename(file_info['title'])
                                                 extension = save_path.rsplit('.', 1)[-1]
-                                                child_s3_path = f"{parent_folder}/{section_name}/child_{idx}.{extension}"
+                                                child_s3_path = f"{parent_folder}/{section_name}/{file_title}.{extension}"
                                                 
                                                 # Upload to S3
                                                 if self.upload_to_s3(content, child_s3_path):
                                                     downloaded_count += 1
-                                                    logger.info(f"      ✓ Uploaded child file {idx}/{len(matching_links)} to {section_name}/")
+                                                    logger.info(f"      ✓ Uploaded: {file_title}.{extension}")
                                                 else:
-                                                    logger.error(f"      ✗ Failed to upload child file {idx}")
+                                                    logger.error(f"      ✗ Failed to upload: {file_title}.{extension}")
                                         
                                         # Reload detail_soup for next iteration (ViewState may change)
                                         if idx < len(matching_links):
