@@ -469,23 +469,102 @@ class KCSBScraper:
                         want_pdf = 'LinkButton3' in event_target  # LinkButton3 = PDF
                         want_excel = 'LinkButton4' in event_target  # LinkButton4 = Excel
                         
-                        # Find all RepeaterForChild links
+                        # Find ALL RepeaterForChild links (expanded section may have multiple files)
                         repeater_links = detail_soup.find_all('a', {'id': lambda x: x and 'RepeaterForChild' in x})
+                        matching_links = []
                         
                         for link in repeater_links:
                             img = link.find('img')
                             if img:
                                 img_src = img.get('src', '').lower()
                                 
-                                # Match file type
+                                # Collect ALL links matching file type
                                 if want_pdf and 'pdf' in img_src:
-                                    download_link = link
-                                    logger.debug(f"Found RepeaterForChild PDF link: {link.get('id')}")
-                                    break
+                                    matching_links.append(link)
                                 elif want_excel and ('xls' in img_src or 'excel' in img_src):
-                                    download_link = link
-                                    logger.debug(f"Found RepeaterForChild Excel link: {link.get('id')}")
-                                    break
+                                    matching_links.append(link)
+                        
+                        if matching_links:
+                            logger.info(f"    Found {len(matching_links)} files in expanded section")
+                            
+                            # Download ALL files from expanded section
+                            downloaded_count = 0
+                            for idx, link in enumerate(matching_links, 1):
+                                link_id = link.get('id', '')
+                                logger.info(f"    Downloading {idx}/{len(matching_links)} from expanded section...")
+                                
+                                # Extract event target
+                                href = link.get('href', '')
+                                if '__doPostBack' in href:
+                                    match = re.search(r"__doPostBack\('([^']+)'", href)
+                                    if match:
+                                        child_event_target = match.group(1)
+                                        
+                                        # Get fresh ViewState
+                                        form_data2 = self.get_viewstate_data(detail_soup)
+                                        form_data2['__EVENTTARGET'] = child_event_target
+                                        form_data2['__EVENTARGUMENT'] = ''
+                                        
+                                        # Get all form fields
+                                        form2 = detail_soup.find('form')
+                                        if form2:
+                                            for inp in form2.find_all('input'):
+                                                name = inp.get('name')
+                                                if name and name not in form_data2:
+                                                    form_data2[name] = inp.get('value', '')
+                                        
+                                        # Download this file
+                                        download_response = self.session.post(
+                                            form_action_url,
+                                            data=form_data2,
+                                            headers=post_headers,
+                                            timeout=60,
+                                            stream=True
+                                        )
+                                        
+                                        content_type = download_response.headers.get('Content-Type', '')
+                                        
+                                        if ('application/pdf' in content_type or 
+                                            'application/vnd' in content_type or 
+                                            'application/octet-stream' in content_type):
+                                            
+                                            content = download_response.content
+                                            
+                                            if len(content) > 1000 or content[:4] == b'%PDF' or content[:2] == b'PK':
+                                                # Generate S3 path for this child file in a subfolder
+                                                # Create subfolder with section name to organize child files
+                                                parent_folder = save_path.rsplit('/', 1)[0]  # Get parent directory
+                                                section_name = self.sanitize_filename(file_info['title'])
+                                                extension = save_path.rsplit('.', 1)[-1]
+                                                child_s3_path = f"{parent_folder}/{section_name}/child_{idx}.{extension}"
+                                                
+                                                # Upload to S3
+                                                if self.upload_to_s3(content, child_s3_path):
+                                                    downloaded_count += 1
+                                                    logger.info(f"      ✓ Uploaded child file {idx}/{len(matching_links)} to {section_name}/")
+                                                else:
+                                                    logger.error(f"      ✗ Failed to upload child file {idx}")
+                                        
+                                        # Reload detail_soup for next iteration (ViewState may change)
+                                        if idx < len(matching_links):
+                                            time.sleep(2)  # Brief delay between downloads
+                                            # Re-fetch the expanded section
+                                            refresh_response = self.session.post(
+                                                form_action_url,
+                                                data=form_data,  # Use original form data to keep section expanded
+                                                headers=post_headers,
+                                                timeout=60
+                                            )
+                                            detail_soup = BeautifulSoup(refresh_response.content, 'html.parser')
+                            
+                            # Return a marker indicating expanded section was handled
+                            if downloaded_count > 0:
+                                return b'EXPANDED_SECTION_HANDLED'  # Special marker
+                            else:
+                                return None
+                        
+                        # If no matching links found, set download_link = None to continue
+                        download_link = None
                     
                     if download_link:
                         logger.debug("Found download link, performing second postback...")
@@ -656,13 +735,18 @@ class KCSBScraper:
                 file_content = self.download_file(category_url, event_target, file_info, s3_path)
                 
                 if file_content:
-                    # Upload to S3
-                    if self.upload_to_s3(file_content, s3_path):
+                    # Check if this was an expanded section (files already uploaded)
+                    if file_content == b'EXPANDED_SECTION_HANDLED':
                         stats['success'] += 1
-                        logger.info(f"    ✓ Successfully uploaded: {filename}")
+                        logger.info(f"    ✓ Expanded section files uploaded")
                     else:
-                        stats['failed'] += 1
-                        logger.error(f"    ✗ Failed to upload: {filename}")
+                        # Upload to S3
+                        if self.upload_to_s3(file_content, s3_path):
+                            stats['success'] += 1
+                            logger.info(f"    ✓ Successfully uploaded: {filename}")
+                        else:
+                            stats['failed'] += 1
+                            logger.error(f"    ✗ Failed to upload: {filename}")
                 else:
                     stats['failed'] += 1
                     logger.error(f"    ✗ Failed to download: {filename}")
