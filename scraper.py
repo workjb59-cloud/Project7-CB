@@ -492,10 +492,20 @@ class KCSBScraper:
                             for idx, link in enumerate(matching_links, 1):
                                 link_id = link.get('id', '')
                                 
-                                # Extract file title from link text
-                                file_title = link.get_text(strip=True)
+                                # Extract filename from table structure
+                                # Link is in TD#2, filename is in TD#1 of same row
+                                file_title = None
+                                tr = link.find_parent('tr')
+                                if tr:
+                                    tds = tr.find_all('td')
+                                    if len(tds) > 0:
+                                        # First TD contains the filename
+                                        file_title = tds[0].get_text(strip=True)
+                                
+                                # Fallback: Use index-based name
                                 if not file_title:
-                                    file_title = f"child_{idx}"
+                                    file_title = f"file_{idx}"
+                                    logger.warning(f"      Could not extract filename from table, using fallback: {file_title}")
                                 else:
                                     file_title = self.sanitize_filename(file_title)
                                 
